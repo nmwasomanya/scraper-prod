@@ -7,10 +7,17 @@ from email_crawler.utils.email_utils import EmailUtils
 import json
 import os
 from urllib.parse import urlparse
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Dict, Generator, List, Optional, Union
 
 class SitesSpider(scrapy.Spider):
     name = "sites"
+
+    # Keywords to identify relevant pages for contact info
+    RELEVANT_PATH_KEYWORDS = [
+        'contact', 'about', 'team', 'staff', 'people', 'leadership',
+        'career', 'job', 'support', 'help', 'impressum', 'privacy',
+        'legal', 'imprint', 'touch', 'connect'
+    ]
 
     def __init__(self, input: Optional[str] = None, output: Optional[str] = None, *args: Any, **kwargs: Any):
         super(SitesSpider, self).__init__(*args, **kwargs)
@@ -66,7 +73,7 @@ class SitesSpider(scrapy.Spider):
 
             yield scrapy.Request(url, callback=self.parse, meta=meta, errback=self.errback)
 
-    def parse(self, response: scrapy.http.Response) -> Generator[SiteInfoItem, None, None]:
+    def parse(self, response: scrapy.http.Response) -> Generator[Union[SiteInfoItem, scrapy.Request], None, None]:
         # Extract Emails
         text_body = response.text
         extracted_emails = self.email_utils.extract_emails(text_body)
@@ -109,21 +116,38 @@ class SitesSpider(scrapy.Spider):
             item['mx_ok'] = None
             yield item
 
-        # Crawl Logic: Depth <= 2
+        # Crawl Logic: Depth <= 2, Smart Filtering
         depth = response.meta.get('depth', 0)
         if depth < 2:
             le = LinkExtractor(allow_domains=urlparse(response.url).netloc)
             links = le.extract_links(response)
+
             for link in links:
-                yield scrapy.Request(
-                    link.url,
-                    callback=self.parse,
-                    meta={
-                        'original_data': response.meta['original_data'],
-                        'start_url': response.meta['start_url'],
-                        'depth': depth + 1
-                    }
-                )
+                # Smart filtering: Check if link matches keywords
+                # We check URL and Text
+                lower_url = link.url.lower()
+                lower_text = link.text.lower()
+
+                is_relevant = False
+                for kw in self.RELEVANT_PATH_KEYWORDS:
+                    if kw in lower_url or kw in lower_text:
+                        is_relevant = True
+                        break
+
+                # Special case: If depth is 0 (Home Page), we might want to be slightly more lenient
+                # or strictly enforce keywords. The user said "crawl the home page and then it smartly crawls..."
+                # This implies from home page we only go to relevant pages.
+
+                if is_relevant:
+                    yield scrapy.Request(
+                        link.url,
+                        callback=self.parse,
+                        meta={
+                            'original_data': response.meta['original_data'],
+                            'start_url': response.meta['start_url'],
+                            'depth': depth + 1
+                        }
+                    )
 
     def errback(self, failure: Any) -> None:
         self.logger.error(f"Request failed: {failure.request.url}, {failure.value}")
